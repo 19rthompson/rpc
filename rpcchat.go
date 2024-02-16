@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +65,17 @@ func server(listenAddress string) {
 	shutdown = make(chan struct{})
 	messages = make(map[string][]string)
 
+	ln, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		fmt.Println("Uh oh spaghetti-o")
+	}
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			break
+		}
+		go dispatch(conn)
+	}
 	// set up network listen and accept loop here
 	// to receive RPC requests and dispatch each
 	// in its own goroutine
@@ -74,26 +87,31 @@ func server(listenAddress string) {
 
 func dispatch(conn net.Conn) {
 	// handle a single incomming request:
-	len := make([]byte, 2)
+	lenf := make([]byte, 2)
 	// 1. Read the length (uint16)
-	_, err := conn.Read(len)
+	_, err := conn.Read(lenf)
 	if err != nil {
 		fmt.Printf("Read error 1 - %s\n", err)
 	}
-	var length int = int(binary.BigEndian.Uint32(len))
+	var length int = int(binary.BigEndian.Uint32(lenf))
 
 	// 2. Read the entire message into a []byte
 	message := make([]byte, length)
 	_, err3 := conn.Read(message)
 	if err3 != nil {
 		fmt.Printf("Read error 3 - %s\n", err)
-
 	}
+
+	// 3. From the message, parse the message type (uint16)
 	messageType, message, err2 := ReadUint16(message)
 	if err2 != nil {
 		fmt.Printf("Read error 2 - %s\n", err)
 	}
 	messageString := string(message)
+
+	// 4. Call the appropriate server stub, giving it the
+	//    remainder of the request []byte and collecting
+	//    the response []byte
 	switch messageType {
 	case MsgRegister:
 		err := Register(messageString[2:])
@@ -108,6 +126,13 @@ func dispatch(conn net.Conn) {
 		if err != nil {
 			fmt.Println("Listing error!", err)
 		}
+	case MsgCheckMessages:
+		queue := CheckMessages(messageString)
+
+		bob := WriteStringSlice(make([]byte, 0), queue)
+		append1 := append(WriteUint16(make([]byte, 0), uint16(len(bob)+2)), WriteUint16(make([]byte, 0), MsgCheckMessages)...)
+		append2 := append(append1, bob...)
+		conn.Write(append2)
 	case MsgTell:
 		user := strings.Split(messageString, " ")[0]
 		target := strings.Split(messageString, " ")[1]
@@ -122,11 +147,8 @@ func dispatch(conn net.Conn) {
 	default:
 		fmt.Println("You need help!")
 	}
-	// 3. From the message, parse the message type (uint16)
+	conn.Close()
 
-	// 4. Call the appropriate server stub, giving it the
-	//    remainder of the request []byte and collecting
-	//    the response []byte
 	// 5. Write the message length (uint16)
 	// 6. Write the message []byte
 	// 7. Close the connection
@@ -134,6 +156,61 @@ func dispatch(conn net.Conn) {
 	// On any error, be sure to close the connection, log a
 	// message, and return (a request error should not kill
 	// the entire server)
+}
+
+func CheckMessagesRPC(server string, user string) ([]string, error) {
+	response, err := SendAndReceive(server, WriteString(WriteUint16(make([]byte, 2), MsgCheckMessages), user))
+	if err != nil {
+		fmt.Println("Send And Receive Error! 不好!")
+	}
+	var count uint16 = 0
+	stringy := make([]byte, 0)
+	output := make([]string, 0)
+	for i, b := range response[2:] {
+		if count == 0 {
+			count, _, _ = ReadUint16(response[i : i+1])
+			stringy = make([]byte, 0)
+			continue
+		}
+		stringy = append(stringy, b)
+		count--
+		if count == 0 {
+			output = append(output, string(stringy))
+		}
+	}
+	return output, nil
+}
+
+func SendAndReceive(server string, request []byte) ([]byte, error) {
+	conn, err := net.Dial("tcp", server)
+	if err != nil {
+		fmt.Println("Heck!")
+	}
+	fmt.Fprintf(conn, "GET / HTTP/1.0\r\n\r\n")
+	_, err2 := bufio.NewReader(conn).ReadString('\n')
+	if err2 != nil {
+		fmt.Println("Whoopsie doo")
+	}
+	defer conn.Close()
+	lenth := WriteUint16(make([]byte, 2), uint16(len(request)))
+	jimmy := append(lenth, request...)
+	_, err3 := conn.Write(jimmy)
+	if err3 != nil {
+		fmt.Println("Crying rn brb")
+	}
+	lemth := make([]byte, 2)
+	_, err4 := conn.Read(lemth)
+	if err4 != nil {
+		fmt.Println("read error, yo")
+	}
+	stringy, _, _ := ReadString(lemth)
+	stringy2, _ := strconv.Atoi(stringy)
+	response := make([]byte, stringy2)
+	_, err5 := conn.Read(response)
+	if err5 != nil {
+		fmt.Println("Almost made it")
+	}
+	return response, nil
 }
 
 func Register(user string) error {
