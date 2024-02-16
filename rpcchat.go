@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -65,7 +66,6 @@ func server(listenAddress string) {
 	// set up network listen and accept loop here
 	// to receive RPC requests and dispatch each
 	// in its own goroutine
-	// ...
 
 	// wait for a shutdown request
 	<-shutdown
@@ -74,9 +74,56 @@ func server(listenAddress string) {
 
 func dispatch(conn net.Conn) {
 	// handle a single incomming request:
+	len := make([]byte, 2)
 	// 1. Read the length (uint16)
+	_, err := conn.Read(len)
+	if err != nil {
+		fmt.Printf("Read error 1 - %s\n", err)
+	}
+	var length int = int(binary.BigEndian.Uint32(len))
+
 	// 2. Read the entire message into a []byte
+	message := make([]byte, length)
+	_, err3 := conn.Read(message)
+	if err3 != nil {
+		fmt.Printf("Read error 3 - %s\n", err)
+
+	}
+	messageType, message, err2 := ReadUint16(message)
+	if err2 != nil {
+		fmt.Printf("Read error 2 - %s\n", err)
+	}
+	messageString := string(message)
+	switch messageType {
+	case MsgRegister:
+		err := Register(messageString[2:])
+		if err != nil {
+			fmt.Println("Name error!", err)
+		}
+	case MsgList:
+		users := List()                        // returns a slice of users []users
+		foo := make([]byte, 2)                 // makes empty slice of bytes, length 2 []byte
+		pickle := WriteStringSlice(foo, users) // returns a slice of bytes []byte
+		_, err := conn.Write(pickle)           // returns integer
+		if err != nil {
+			fmt.Println("Listing error!", err)
+		}
+	case MsgTell:
+		user := strings.Split(messageString, " ")[0]
+		target := strings.Split(messageString, " ")[1]
+		message := strings.TrimLeft(messageString, user+" "+target+" ")
+		Tell(user, target, message)
+	case MsgSay:
+		user := strings.Split(messageString, " ")[0]
+		message := strings.TrimLeft(messageString, user+" ")
+		Say(user, message)
+	case MsgShutdown:
+		Shutdown()
+	default:
+		fmt.Println("You need help!")
+	}
 	// 3. From the message, parse the message type (uint16)
+
 	// 4. Call the appropriate server stub, giving it the
 	//    remainder of the request []byte and collecting
 	//    the response []byte
@@ -172,4 +219,57 @@ func Quit(user string) {
 
 func Shutdown() {
 	shutdown <- struct{}{}
+}
+
+func WriteUint16(buf []byte, n uint16) []byte {
+	return append(buf, byte(n>>8), byte(n))
+}
+
+func ReadUint16(buf []byte) (uint16, []byte, error) {
+	if len(buf) < 2 {
+		return 0, buf, fmt.Errorf("buffer too short")
+	}
+	value := uint16(buf[0])<<8 + uint16(buf[1])
+	return value, buf[2:], nil
+}
+
+func WriteString(buf []byte, s string) []byte {
+	buf = WriteUint16(buf, uint16(len(s)))
+	return append(buf, s...)
+}
+
+func ReadString(buf []byte) (string, []byte, error) {
+	length, rest, err := ReadUint16(buf)
+	if err != nil {
+		return "", rest, err
+	}
+	if len(rest) < int(length) {
+		return "", rest, fmt.Errorf("buffer too short for string")
+	}
+	return string(rest[:length]), rest[length:], nil
+}
+
+func WriteStringSlice(buf []byte, s []string) []byte {
+	buf = WriteUint16(buf, uint16(len(s))) // Write the slice length
+	for _, str := range s {
+		buf = WriteString(buf, str) // Write each string
+	}
+	return buf
+}
+
+func ReadStringSlice(buf []byte) ([]string, []byte, error) {
+	length, rest, err := ReadUint16(buf) // Slice length
+	if err != nil {
+		return nil, rest, err
+	}
+	var strs []string
+	for i := 0; i < int(length); i++ {
+		var str string
+		str, rest, err = ReadString(rest)
+		if err != nil {
+			return strs, rest, err
+		}
+		strs = append(strs, str)
+	}
+	return strs, rest, nil
 }
