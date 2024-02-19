@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,8 +55,7 @@ func main() {
 	if len(listenAddress) > 0 {
 		server(listenAddress)
 	} else {
-		fmt.Println("client function not implemented yet")
-		// client(serverAddress, username)
+		client(serverAddress, username)
 	}
 }
 
@@ -65,9 +63,9 @@ func server(listenAddress string) {
 	shutdown = make(chan struct{})
 	messages = make(map[string][]string)
 
-	ln, err := net.Listen("tcp", ":8080")
+	ln, err := net.Listen("tcp", listenAddress)
 	if err != nil {
-		fmt.Println("Uh oh spaghetti-o")
+		fmt.Printf("Failed to listen on %s: %v", listenAddress, err)
 	}
 	for {
 		conn, err := ln.Accept()
@@ -85,6 +83,56 @@ func server(listenAddress string) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+func client(serverAddress string, username string) {
+	theBuffer := WriteUint16(make([]byte, 0), MsgRegister)
+	theRequest := WriteString(theBuffer, username)
+
+	SendAndReceive(serverAddress, theRequest)
+	go func() {
+		for {
+			message, _ := CheckMessagesRPC(serverAddress, username)
+			if len(message[0]) != 0 {
+				fmt.Println(message[0])
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}()
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := scanner.Text()
+		arg := strings.Fields(line)
+		switch arg[0] {
+		case "tell":
+			tellBuffer := WriteUint16(make([]byte, 0), MsgTell)
+			tellUser := WriteString(tellBuffer, username)
+			tellTargetAndMessage := WriteString(tellUser, line[4:])
+			SendAndReceive(serverAddress, tellTargetAndMessage)
+		case "say":
+			sayBuffer := WriteUint16(make([]byte, 0), MsgSay)
+			sayUser := WriteString(sayBuffer, username)
+			sayMessage := WriteString(sayUser, line[3:])
+			SendAndReceive(serverAddress, sayMessage)
+		case "list":
+			listBuffer := WriteUint16(make([]byte, 0), MsgList)
+			listOfNames, _ := SendAndReceive(serverAddress, listBuffer)
+			listOfNames = listOfNames[:len(listOfNames)-1]
+			fmt.Println(string(listOfNames))
+		case "quit":
+			quitBuffer := WriteUint16(make([]byte, 0), MsgQuit)
+			quitUser := WriteString(quitBuffer, username)
+			SendAndReceive(serverAddress, quitUser)
+			os.Exit(0)
+		case "shutdown":
+			shutdownBuffer := WriteUint16(make([]byte, 0), MsgShutdown)
+			SendAndReceive(serverAddress, shutdownBuffer)
+		default:
+			fmt.Println("It looks like you need some help.\nValid commands:\n\ttell <user> some message\n\tsay some other message\n\tlist\n\tquit\n\tshutdown")
+
+		}
+	}
+
+}
+
 func dispatch(conn net.Conn) {
 	// handle a single incomming request:
 	lenf := make([]byte, 2)
@@ -93,7 +141,7 @@ func dispatch(conn net.Conn) {
 	if err != nil {
 		fmt.Printf("Read error 1 - %s\n", err)
 	}
-	var length int = int(binary.BigEndian.Uint32(lenf))
+	var length int = int(binary.BigEndian.Uint16(lenf))
 
 	// 2. Read the entire message into a []byte
 	message := make([]byte, length)
@@ -114,15 +162,21 @@ func dispatch(conn net.Conn) {
 	//    the response []byte
 	switch messageType {
 	case MsgRegister:
-		err := Register(messageString[2:])
+		err := Register(messageString)
 		if err != nil {
 			fmt.Println("Name error!", err)
 		}
 	case MsgList:
-		users := List()                        // returns a slice of users []users
-		foo := make([]byte, 2)                 // makes empty slice of bytes, length 2 []byte
-		pickle := WriteStringSlice(foo, users) // returns a slice of bytes []byte
-		_, err := conn.Write(pickle)           // returns integer
+		users := List() // returns a slice of users []users
+		fmt.Println("Users:", users)
+		foo := make([]byte, 0) // makes empty slice of bytes, length 2 []byte
+
+		pickle := WriteStringSliceList(foo, users) // returns a slice of bytes []byte
+		fmt.Println("Pickle:", pickle)
+		length := len(pickle)
+		lengthByte := WriteUint16(make([]byte, 0), uint16(length))
+		pickle = append(lengthByte, pickle...)
+		_, err := conn.Write(pickle) // returns integer
 		if err != nil {
 			fmt.Println("Listing error!", err)
 		}
@@ -136,15 +190,23 @@ func dispatch(conn net.Conn) {
 	case MsgTell:
 		user := strings.Split(messageString, " ")[0]
 		target := strings.Split(messageString, " ")[1]
-		message := strings.TrimLeft(messageString, user+" "+target+" ")
+		message := strings.TrimPrefix(messageString, user+" "+target+" ")
+		// fmt.Println("User:", user, "Target:", target, "Message:", message)
 		Tell(user, target, message)
 	case MsgSay:
 		user := strings.Split(messageString, " ")[0]
-		message := strings.TrimLeft(messageString, user+" ")
+		message := strings.TrimPrefix(messageString, user+" ")
 		Say(user, message)
+	case MsgQuit:
+		user := strings.Split(messageString, " ")[0]
+		Quit(user)
 	case MsgShutdown:
 		Shutdown()
+		os.Exit(0)
 	default:
+		fmt.Println("message:", message)
+		fmt.Println("Message String:", messageString)
+		fmt.Println("Message Type:", messageType)
 		fmt.Println("You need help!")
 	}
 	conn.Close()
@@ -159,53 +221,43 @@ func dispatch(conn net.Conn) {
 }
 
 func CheckMessagesRPC(server string, user string) ([]string, error) {
-	response, err := SendAndReceive(server, WriteString(WriteUint16(make([]byte, 2), MsgCheckMessages), user))
+	response, err := SendAndReceive(server, WriteString(WriteUint16(make([]byte, 0), MsgCheckMessages), user))
+	// fmt.Println("Response:", response)
 	if err != nil {
 		fmt.Println("Send And Receive Error! 不好!")
 	}
-	var count uint16 = 0
-	stringy := make([]byte, 0)
-	output := make([]string, 0)
-	for i, b := range response[2:] {
-		if count == 0 {
-			count, _, _ = ReadUint16(response[i : i+1])
-			stringy = make([]byte, 0)
-			continue
-		}
-		stringy = append(stringy, b)
-		count--
-		if count == 0 {
-			output = append(output, string(stringy))
-		}
+	if len(response) == 0 {
+		return nil, nil
 	}
-	return output, nil
+	messages := make([]string, 1)
+	messages[0] = string(response[2:])
+	return messages, nil
 }
 
 func SendAndReceive(server string, request []byte) ([]byte, error) {
 	conn, err := net.Dial("tcp", server)
 	if err != nil {
-		fmt.Println("Heck!")
-	}
-	fmt.Fprintf(conn, "GET / HTTP/1.0\r\n\r\n")
-	_, err2 := bufio.NewReader(conn).ReadString('\n')
-	if err2 != nil {
-		fmt.Println("Whoopsie doo")
+		fmt.Println(err)
 	}
 	defer conn.Close()
-	lenth := WriteUint16(make([]byte, 2), uint16(len(request)))
-	jimmy := append(lenth, request...)
-	_, err3 := conn.Write(jimmy)
+
+	lengthPrefix := WriteUint16(make([]byte, 0), uint16(len(request)))
+	fullRequest := append(lengthPrefix, request...)
+
+	_, err3 := conn.Write(fullRequest)
 	if err3 != nil {
-		fmt.Println("Crying rn brb")
+		fmt.Println("Error sending request:", err3)
 	}
-	lemth := make([]byte, 2)
-	_, err4 := conn.Read(lemth)
+
+	responseLengthBytes := make([]byte, 2)
+	_, err4 := conn.Read(responseLengthBytes)
 	if err4 != nil {
-		fmt.Println("read error, yo")
+		// fmt.Println("Finished reading line:", err4)
 	}
-	stringy, _, _ := ReadString(lemth)
-	stringy2, _ := strconv.Atoi(stringy)
-	response := make([]byte, stringy2)
+
+	responseLength := int(responseLengthBytes[0])<<8 + int(responseLengthBytes[1])
+
+	response := make([]byte, responseLength)
 	_, err5 := conn.Read(response)
 	if err5 != nil {
 		fmt.Println("Almost made it")
@@ -311,7 +363,6 @@ func ReadUint16(buf []byte) (uint16, []byte, error) {
 }
 
 func WriteString(buf []byte, s string) []byte {
-	buf = WriteUint16(buf, uint16(len(s)))
 	return append(buf, s...)
 }
 
@@ -327,9 +378,15 @@ func ReadString(buf []byte) (string, []byte, error) {
 }
 
 func WriteStringSlice(buf []byte, s []string) []byte {
-	buf = WriteUint16(buf, uint16(len(s))) // Write the slice length
 	for _, str := range s {
 		buf = WriteString(buf, str) // Write each string
+	}
+	return buf
+}
+func WriteStringSliceList(buf []byte, s []string) []byte {
+	for _, str := range s {
+		buf = WriteString(buf, str) // Write each string
+		buf = WriteString(buf, "\n")
 	}
 	return buf
 }
